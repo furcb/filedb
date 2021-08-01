@@ -43,7 +43,18 @@ editor friendly.
 The segment of the file that contains the contents of the map. (not sure whether to make it line
 delimited)
 
-## Implementation Pitfalls
+## Layout
+
+- 192 bytes (first three pointers)
+- first u64 pointer is the end of the first section
+
+## Implementation Details and Pitfalls
+
+- All values will use Big-Endian.
+- First byte in data section is an anchor byte, any index that points to zero is empty.
+
+- Usage of u64: File seeking in Rust only accepts u64 because the Files in rust are wrapper around
+	the IO implementation in `libc`, and that uses 64bit numbers.
 
 - Case: update an old value, and the new value is either shorter or longer than the old value which
 	cause a "hole" or missing space.
