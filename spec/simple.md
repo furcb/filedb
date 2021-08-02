@@ -56,6 +56,11 @@ delimited)
 - Usage of u64: File seeking in Rust only accepts u64 because the Files in rust are wrapper around
 	the IO implementation in `libc`, and that uses 64bit numbers.
 
+- Case: partial update, eof now at end of file but not end of data section due to partial data
+ - Simple: Add pointer to pointer section to keep track of end of data section. May be the better
+	 option since the arithmetic and access seems simpler.
+ - Medium: Add length to `hole` of data section that all indexes point to, hole would become 8 bytes
+	 long rather then 1 byte long
 - Case: update an old value, and the new value is either shorter or longer than the old value which
 	cause a "hole" or missing space.
  - Simple solution: shift the data to the right by the difference
