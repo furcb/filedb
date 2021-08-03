@@ -1,5 +1,5 @@
 use std::fs::File;
-use std::io::{self, prelude::*, BufWriter, SeekFrom};
+use std::io::{prelude::*, SeekFrom};
 use std::path::Path;
 use std::convert::TryFrom;
 
@@ -32,15 +32,19 @@ impl Metadata {
         }
     }
 
-    pub fn section_address(&self, section: Section) -> Option<u64> {
-        match section {
+    pub fn section_address(&self, section: Section) -> EkErr<u64> {
+        let address;
+
+        address = match section {
             Section::Metadata => self.addresses.get(0),
             Section::Indexes => self.addresses.get(1),
             Section::Data => self.addresses.get(2),
             Section::DataEnd => self.addresses.get(3),
         }
         // u64 so clone is just a copy
-        .copied()
+        .copied();
+
+        address.ok_or(EK::MetadataMissing)
     }
 
     pub fn update_section_address(

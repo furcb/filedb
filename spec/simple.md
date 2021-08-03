@@ -52,6 +52,7 @@ delimited)
 
 - All values will use Big-Endian.
 - First byte in data section is an anchor byte, any index that points to zero is empty.
+- Update data block, delete and insert.
 
 - Usage of u64: File seeking in Rust only accepts u64 because the Files in rust are wrapper around
 	the IO implementation in `libc`, and that uses 64bit numbers.
