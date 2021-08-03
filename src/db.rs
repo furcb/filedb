@@ -9,28 +9,47 @@ use crate::metadata::{Metadata, Section};
 type EK = ErrorKind;
 type EkErr<T> = Result<T, EK>;
 
+/// Semantic versioning: the Major version number. Incremented when changes are made to the
+/// specification or implementation that break backwards compatibility. Baked into the metadata of
+/// the file.
 pub const MJR_VER: u32 = 0;
+/// SemVer: Minor version number. Incremented when changes are introduced that do not break
+/// backwards compatibility. Baked into the metadata of the file.
 pub const MIN_VER: u32 = 1;
 
+/// Error that can occur while mutating the database
 #[derive(Debug)]
 pub enum ErrorKind {
+    /// Simple wrapper for `std::io::Error`s.
     IO(io::Error),
+    /// Address arithmetic overflowed, addresses are u64 so it just means 12TB's has been reached.
     AddressOverflow,
+    /// This can occur in instances where usize is not 64 bits.
     AddressConversionFailed,
+    /// A buffer necessary to write to the data base was empty or not provided.
     BufferMissing,
+    /// `FileDB` had a previous `std::io::Error` and file was dropped due to that error. Attempt to
+    /// reload the database.
     DBFileMissing,
+    /// Attempting to insert into an already written to index is not possible, to do this `update`
+    /// _must_ be used.
     IndexAlreadyExists,
+    /// Index is empty, generally useful for deciding whether to insert or update.
     IndexEmpty,
+    /// Metadata is missing
     MetadataMissing,
+    /// Block buffer not given, should only occur when attempting to write block to database.
     BlockDataNotProvided,
+    /// Fatal error, leaves the database in an unrecoverable state. Manual intervention is
+    /// necessary.
     SectionCorrupted,
 }
 
-#[derive(Debug)]
 /// `IndexBlock` container for the tuple in an index block, both values are u64.
 ///
 /// Data block values, address and length, are options for instances when values are not known
 /// ahead of time in the case of an access, they can be set to `Option::None`.
+#[derive(Debug)]
 pub struct IndexBlock {
     /// Block address for the index block itself
     index_address: u64,
@@ -40,6 +59,8 @@ pub struct IndexBlock {
     length: Option<u64>,
 }
 
+/// `DataBlock` is a container for the metadata of that block as well as the content. Address and
+/// length are u64, and the data is a byte slice.
 #[derive(Debug)]
 pub struct DataBlock<'a> {
     address: u64,
@@ -47,6 +68,20 @@ pub struct DataBlock<'a> {
     data: Option<&'a [u8]>,
 }
 
+/// `FileDB` is the main point of interaction, it contains a mutable pointer to a `File` and an
+/// owned `Metadata` of FileDB.
+///
+/// Actions:
+///
+/// - Are in-place unless otherwise stated, so temporary files are not created.
+/// - Mutating the FileDB can should only be done through `FileDB`.
+///
+/// Warning:
+///
+/// - Some actions can leave FileDB in an unrecoverable state due to the fact that changes are done
+/// in place. Only insert changes should be considered safe. They are only applied after a
+/// successful write.  In the event a write fails, addresses are not updated allowing for another
+/// attempt at a write.
 #[derive(Debug)]
 pub struct FileDB {
     file_db: Option<File>,
@@ -54,6 +89,7 @@ pub struct FileDB {
 }
 
 impl IndexBlock {
+    /// Create an "un-initialized" `IndexBlock`
     pub fn new(index_address: u64) -> Self {
         Self {
             index_address,
@@ -62,11 +98,13 @@ impl IndexBlock {
         }
     }
 
+    /// Set the address, used when the intention is to write to the file
     pub fn with_address(mut self, address: u64) -> Self {
         self.address = Some(address);
         self
     }
 
+    /// Set the length, used when the intention is to write to the file
     pub fn with_length(mut self, length: u64) -> Self {
         self.length = Some(length);
         self
@@ -97,6 +135,9 @@ impl IndexBlock {
         }
     }
 
+    /// Create an `IndexBlock` from `Metadata` information, `index` is necessary so the
+    /// `index_address` can be calculated. `data` for the length of length of the `DataBlock`.
+    /// The data block address can be automatically calculated.
     fn try_from_metadata(metadata: &Metadata, index: u64, data: &[u8]) -> EkErr<Self> {
         let index_address;
         let address;
@@ -118,22 +159,27 @@ impl IndexBlock {
         })
     }
 
+    /// Get the data block address, may be un-initialized or an error could occur on retrieval
     pub fn address(&self) -> EkErr<u64> {
         self.address.ok_or(EK::BlockDataNotProvided)
     }
 
+    /// Get the data block length, may be un-initialized or an error could occur on retrieval
     pub fn length(&self) -> EkErr<u64> {
         self.length.ok_or(EK::BlockDataNotProvided)
     }
 
+    /// Get the data block address or return a zero
     pub fn address_lossy(&self) -> u64 {
         self.address.unwrap_or(0)
     }
 
+    /// Get the data block length or return a zero
     pub fn length_lossy(&self) -> u64 {
         self.length.unwrap_or(0)
     }
 
+    /// Write the `IndexBlock` information to the file
     pub fn write_to_file(&self, file: &mut File) -> EkErr<()> {
         let address;
         let length;
@@ -154,6 +200,7 @@ impl IndexBlock {
         Ok(())
     }
 
+    /// Read and parse the `IndexBlock` in the file
     pub fn read_from_file(&mut self, file: &mut File) -> EkErr<()> {
         let address;
         let length;
@@ -201,6 +248,7 @@ impl<'a> DataBlock<'a> {
         }
     }
 
+    /// Assign the data in builder fashion
     pub fn with_data(mut self, data: &'a [u8]) -> Self {
         self.data = Some(data);
         self
@@ -257,6 +305,11 @@ impl<'a> TryFrom<&IndexBlock> for DataBlock<'a> {
 }
 
 impl FileDB {
+    /// Create a new empty data base with an expected capacity.
+    ///
+    /// Expected capacity must be known at creation time otherwise section lengths would not be
+    /// able to be calculated. Even if `FileDB` had the ability to grow and shrink the Metadata
+    /// sections, we must know the length of each section except the data section.
     pub fn create_db(path: impl AsRef<Path>, expected_capacity: u64) -> EkErr<Self> {
         // TODO: improve this, better to do just one file open and save the generated data as we go
         // and return it as a FileDB instance
@@ -270,6 +323,7 @@ impl FileDB {
         FileDB::load_db(&path)
     }
 
+    /// Load `FileDB` at the given path.
     pub fn load_db(path: impl AsRef<Path>) -> EkErr<Self> {
         let metadata;
         let file;
@@ -289,6 +343,7 @@ impl FileDB {
         })
     }
 
+    /// Retrieve a byte vector of the data at a given index
     pub fn get(&mut self, index: u64) -> EkErr<Vec<u8>> {
         let value;
         let index_block;
@@ -310,6 +365,7 @@ impl FileDB {
         Ok(value)
     }
 
+    /// Insert a byte vector at the given index
     pub fn insert(&mut self, index: u64, data: &[u8]) -> EkErr<()> {
         // inserts an item into an empty position
         let index_block;
@@ -369,6 +425,11 @@ impl FileDB {
         Ok(())
     }
 
+    /// Update the value at a given index
+    ///
+    /// Alias for a delete and insert
+    ///
+    /// `resize` currently does not due anything, reserved parameter
     pub fn update(&mut self, index: u64, data: &[u8], _resize: bool) -> EkErr<()> {
         // TODO: if resize is false and data is not exactly the same size as old data return an
         // error, otherwise replace old data. If resize is true and data is the exact same size
@@ -383,6 +444,11 @@ impl FileDB {
         Ok(())
     }
 
+    /// Delete value at index and resets the index
+    ///
+    /// Deleting is costly as it requires shifting the data in the database and updating all index
+    /// values even index position less than the one specified. This is due to the fact that index
+    /// order does not translate to data order.
     pub fn delete(&mut self, index: u64) -> EkErr<Vec<u8>> {
         let data;
         let data_section_end_address;
@@ -408,6 +474,17 @@ impl FileDB {
         Ok(data)
     }
 
+    /// Update all index values within the index section
+    ///
+    /// Useful when a deletion or update occurs.
+    ///
+    /// This is costly as _all_ indexes must be updated due to the nature of how data is inserted
+    /// in the data section, and all indexes act as pointers rather than offset markers.
+    ///
+    /// Warning: Failing here can potentially leave the database in an unrecoverable state without
+    /// manual intervention. Since data is in the data section is unordered, unless it is easily
+    /// segmented visually or by other means, it is impossible to use a corrupted index list to
+    /// view data.
     fn update_indexes(
         file: &mut File,
         metadata: &Metadata,
@@ -476,7 +553,11 @@ impl FileDB {
         Ok(())
     }
 
-    pub fn delete_block(file: &mut File, metadata: &Metadata, index: u64) -> EkErr<Vec<u8>> {
+    /// Will attempt to delete a data block for a specific index
+    ///
+    /// Carries the same warning as `updating_indexes` because when a delete occurs indexes must be
+    /// updated
+    fn delete_block(file: &mut File, metadata: &Metadata, index: u64) -> EkErr<Vec<u8>> {
         let data;
         let mut index_block;
         let mut data_block;
@@ -501,6 +582,7 @@ impl FileDB {
         Ok(data)
     }
 
+    /// Will shift data by a specific amount
     fn shift_data(file: &mut File, address: u64, mut shift_amount: i64) -> EkErr<()> {
         // Assumption: address is the start of the datablock
         // NOTE: potential improvement: partial or whole shift
@@ -534,8 +616,8 @@ impl FileDB {
         Ok(())
     }
 
-    #[allow(dead_code)] // necessary in the future
     /// Obtain the byte position in the file
+    #[allow(dead_code)] // necessary in the future
     fn eof_position(&mut self) -> EkErr<u64> {
         let file;
         let eof_position;
