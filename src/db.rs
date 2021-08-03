@@ -1,3 +1,4 @@
+use std::convert::{TryFrom, TryInto};
 use std::error::Error;
 use std::fs::{File, OpenOptions};
 use std::io::{self, prelude::*, BufWriter, SeekFrom};
@@ -16,9 +17,11 @@ pub const MIN_VER: u32 = 0;
 pub enum ErrorKind {
     IO(io::Error),
     AddressOverflow,
+    AddressConversionFailed,
     BufferMissing,
     DBFileMissing,
     IndexAlreadyExists,
+    IndexEmpty,
     MetadataMissing,
     BlockDataNotProvided,
 }
@@ -59,6 +62,59 @@ impl IndexBlock {
         }
     }
 
+    /// Return `IndexBlock` data based on index in Indexes
+    ///
+    /// If look up fails for any reason assume file had an issue and is no longer accessible
+    fn from_filedb(file: &mut File, metadata: &Metadata, index: u64) -> EKErr<Self> {
+        let index_section_address;
+        let index_address;
+        let mut index_block;
+
+        // if index section does not exist return None
+        index_section_address = metadata
+            .section_address(Section::Indexes)
+            .ok_or(ErrorKind::MetadataMissing)?;
+        index_address = index_section_address + (16 * index);
+
+        index_block = IndexBlock::new(index_address, None, None);
+        IndexBlock::read_from_file(&mut index_block, file)?;
+
+        eprintln!("{:?}", index_block);
+
+        Ok(index_block)
+    }
+
+    fn try_from_metadata(metadata: &Metadata, index: u64, data: &[u8]) -> EKErr<Self> {
+        let index_address;
+        let address;
+        let length;
+
+        index_address = metadata
+            .section_address(Section::Indexes)
+            .ok_or(ErrorKind::MetadataMissing)?;
+        address = metadata
+            .section_address(Section::DataEnd)
+            .ok_or(ErrorKind::MetadataMissing)?;
+        length = data
+            .len()
+            .try_into()
+            .map_err(|_| ErrorKind::AddressConversionFailed)?;
+
+        Ok(Self {
+            index_address: index_address + (index * 16),
+            address: Some(address),
+            length: Some(length),
+        })
+    }
+
+    pub fn address(&self) -> Result<u64, ErrorKind> {
+        self.address.ok_or(ErrorKind::BlockDataNotProvided)
+    }
+
+    pub fn length(&self) -> Result<u64, ErrorKind> {
+        self.length.ok_or(ErrorKind::BlockDataNotProvided)
+    }
+
     pub fn address_lossy(&self) -> u64 {
         self.address.unwrap_or(0)
     }
@@ -72,8 +128,8 @@ impl IndexBlock {
         let length;
         let mut buffer;
 
-        address = self.address.ok_or(ErrorKind::BlockDataNotProvided)?;
-        length = self.length.ok_or(ErrorKind::BlockDataNotProvided)?;
+        address = self.address()?;
+        length = self.length()?;
 
         // write new block information
         file.seek(SeekFrom::Start(self.index_address))
@@ -134,6 +190,11 @@ impl<'a> DataBlock<'a> {
         }
     }
 
+    pub fn with_data(mut self, data: &'a [u8]) -> Self {
+        self.data = Some(data);
+        self
+    }
+
     /// Writes the data that was provided
     ///
     /// Can fail for IO reason, but also if no data was provided. For example expected use was to
@@ -174,6 +235,18 @@ impl<'a> DataBlock<'a> {
     }
 }
 
+impl<'a> TryFrom<&IndexBlock> for DataBlock<'a> {
+    type Error = ErrorKind;
+
+    fn try_from(value: &IndexBlock) -> Result<Self, Self::Error> {
+        Ok(Self {
+            address: value.address()?,
+            length: value.length()?,
+            data: None,
+        })
+    }
+}
+
 impl FileDB {
     pub fn create_db(path: impl AsRef<Path>, expected_capacity: u64) -> EKErr<Self> {
         // TODO: improve this, better to do just one file open and save the generated data as we go
@@ -199,7 +272,7 @@ impl FileDB {
             .open(&path)
             .map_err(ErrorKind::IO)?;
 
-        metadata = metadata::read_metadata(&path).map_err(ErrorKind::IO)?;
+        metadata = Metadata::try_from(path.as_ref())?;
 
         Ok(Self {
             file_db: Some(file),
@@ -208,59 +281,32 @@ impl FileDB {
     }
 
     pub fn get(&mut self, index: u64) -> EKErr<Vec<u8>> {
-        // TODO: think of a way to handle case where the db is empty, maybe have a flag to know if
-        // its empty, or check via some file length calculation
-        // Better alternative: first byte in data section is zero, data starts at first byte
-        //let data_section_address;
         let value;
-        //let reader;
         let index_block;
-        let address;
-        let length;
-        let mut tmp_file;
+        let mut file;
         let mut data_block;
 
-        index_block = self.index(index)?;
+        // take file
+        file = self.file_db.take().ok_or(ErrorKind::DBFileMissing)?;
 
         // if any section does not exist return None
-        //data_section_address = self
-            //.metadata
-            //.section_address(Section::Data)
-            //.ok_or(ErrorKind::MetadataMissing)?;
-        address = index_block.address.ok_or(ErrorKind::BlockDataNotProvided)?;
-        length = index_block.length.ok_or(ErrorKind::BlockDataNotProvided)?;
-        data_block = DataBlock::new(address, length, None);
+        index_block = IndexBlock::from_filedb(&mut file, &self.metadata, index)?;
+        data_block = DataBlock::try_from(&index_block)?;
 
-        // take file
-        tmp_file = self.file_db.take().ok_or(ErrorKind::DBFileMissing)?;
+        value = data_block.read_block(&mut file)?;
 
-        //tmp_file
-            //.seek(SeekFrom::Start(data_section_address))
-            //.map_err(ErrorKind::IO)?;
-        //reader = std::io::BufReader::with_capacity(index_block.length_lossy() as usize, tmp_file);
-        //value = Vec::from(reader.buffer());
-        value = data_block.read_block(&mut tmp_file)?;
-
-        // replace file
-        //self.file_db = Some(reader.into_inner());
-        self.file_db = Some(tmp_file);
+        // give back file
+        self.file_db = Some(file);
 
         Ok(value)
     }
 
     pub fn insert(&mut self, index: u64, data: &[u8]) -> EKErr<()> {
         // inserts an item into an empty position
-        let index_section_address;
-        let mut index_block;
+        let index_block;
         let mut data_section_end_address;
         let mut data_block;
         let mut file;
-
-        // index section
-        index_section_address = self
-            .metadata
-            .section_address(Section::Indexes)
-            .ok_or(ErrorKind::MetadataMissing)?;
 
         // data section end
         data_section_end_address = self
@@ -268,45 +314,32 @@ impl FileDB {
             .section_address(Section::DataEnd)
             .ok_or(ErrorKind::MetadataMissing)?;
 
-        // FIXME: this is dubious and not sure why
-        debug_assert!(mem::size_of::<u64>() <= mem::size_of::<usize>());
-
         // at this point we should have a valid state were we just need to catalog the position of
         // new data and write the new data
 
         file = self.file_db.take().ok_or(ErrorKind::DBFileMissing)?;
 
-        // read index block
-        index_block = dbg!(IndexBlock::new(
-            index_section_address + (index * 16),
-            None,
-            None,
-        ));
-        index_block.read_from_file(&mut file)?;
-
-        // index already exists, return error. use update instead
-        if index_block.address_lossy() != 0 {
-            return Err(ErrorKind::IndexAlreadyExists);
+        // if index is empty we can insert otherwise propagate the error or say index already
+        // exists
+        match IndexBlock::from_filedb(&mut file, &self.metadata, index) {
+            Err(ErrorKind::IndexEmpty) => (),
+            Err(e) => return Err(e),
+            Ok(_) => return Err(ErrorKind::IndexAlreadyExists),
         }
 
-        // setup index block
-        index_block = dbg!(IndexBlock::new(
-            index_section_address + (index * 16),
-            Some(data_section_end_address),
-            Some(data.len() as u64),
-        ));
+        // index does not exist so create a new one
+        index_block = IndexBlock::try_from_metadata(&self.metadata, index, &data)?;
 
-        // write data, if successful update end of data_section address
-
-        data_block = DataBlock::new(
-            index_block.address_lossy(),
-            index_block.length_lossy(),
-            Some(data),
-        );
+        // setup data block metadata
+        data_block = DataBlock::try_from(&index_block)?.with_data(data);
 
         // update end of data address
         data_section_end_address = data_section_end_address
-            .checked_add(data.len() as u64)
+            .checked_add(
+                data.len()
+                    .try_into()
+                    .map_err(|_| ErrorKind::AddressConversionFailed)?,
+            )
             .ok_or(ErrorKind::AddressOverflow)?;
 
         // modify data section
@@ -316,9 +349,9 @@ impl FileDB {
         index_block.write_to_file(&mut file)?;
 
         // update data end address
+
         self.metadata
-            .update_section_address(&mut file, Section::DataEnd, data_section_end_address)
-            .map_err(ErrorKind::IO)?;
+            .update_section_address(&mut file, Section::DataEnd, data_section_end_address)?;
 
         self.file_db = Some(file);
 
@@ -329,6 +362,10 @@ impl FileDB {
         // TODO: if resize is false and data is not exactly the same size as old data return an
         // error, otherwise replace old data. If resize is true and data is the exact same size
         // don't resize.
+        // Strategy: any updates that are not the same size as the original data block will be
+        // moved to the end of the data section. This is better than adjusting the old location
+        // because it removes any additional calculations for movements.
+        // update is then a delete and insert with a check on whether we resize or not
         todo!()
     }
 
@@ -337,7 +374,7 @@ impl FileDB {
         todo!();
     }
 
-    ///// Obtain the byte position in the file
+    /// Obtain the byte position in the file
     fn eof_position(&mut self) -> Result<u64, ErrorKind> {
         let file;
         let eof_position;
@@ -356,62 +393,7 @@ impl FileDB {
 
     fn shift_data(&mut self, start: u64, amount: i64) -> DynErr<()> {
         todo!();
-    }
 
-    /// Update the index block with a new `IndexBlock` (start, length)
-    ///
-    /// If update fails assume file had an issue and is now `None`
-    fn update_index(&mut self, index: u64, index_block: IndexBlock) -> Result<(), ErrorKind> {
-        let index_section_address;
-        let index_address;
-        let mut tmp_file;
-
-        // if index section does not exist return None
-        index_section_address = self
-            .metadata
-            .section_address(Section::Indexes)
-            .ok_or(ErrorKind::MetadataMissing)?;
-        index_address = index_section_address + (16 * index);
-
-        // take file
-        tmp_file = self.file_db.take().ok_or(ErrorKind::DBFileMissing)?;
-
-        IndexBlock::write_to_file(&index_block, &mut tmp_file)?;
-
-        // replace file
-        self.file_db = Some(tmp_file);
-
-        Ok(())
-    }
-
-    /// Return `IndexBlock` data based on index in Indexes
-    ///
-    /// If look up fails for any reason assume file had an issue and is no longer accessible
-    fn index(&mut self, index: u64) -> EKErr<IndexBlock> {
-        let index_section_address;
-        let index_address;
-        let mut index_block;
-        let mut tmp_file;
-
-        // if index section does not exist return None
-        index_section_address = self
-            .metadata
-            .section_address(Section::Indexes)
-            .ok_or(ErrorKind::MetadataMissing)?;
-        index_address = index_section_address + (16 * index);
-
-        // take file
-        tmp_file = self.file_db.take().ok_or(ErrorKind::DBFileMissing)?;
-
-        index_block = IndexBlock::new(index_address, None, None);
-        IndexBlock::read_from_file(&mut index_block, &mut tmp_file)?;
-
-        eprintln!("{:?}", index_block);
-
-        // return file
-        self.file_db = Some(tmp_file);
-
-        Ok(index_block)
     }
 }
 
@@ -545,7 +527,7 @@ mod tests {
             create_db(&path, 256).unwrap();
         }
 
-        eprintln!("{:?}", metadata::read_metadata(&path).unwrap());
+        eprintln!("{:?}", Metadata::try_from(path.as_path()).unwrap());
 
         assert!(false);
     }

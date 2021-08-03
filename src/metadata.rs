@@ -1,6 +1,12 @@
 use std::fs::File;
 use std::io::{self, prelude::*, BufWriter, SeekFrom};
 use std::path::Path;
+use std::convert::TryFrom;
+
+use crate::db::ErrorKind;
+
+type EkErr<T> = Result<T, ErrorKind>;
+type EK = ErrorKind;
 
 #[derive(Debug)]
 pub struct Metadata {
@@ -42,7 +48,7 @@ impl Metadata {
         file: &mut File,
         section: Section,
         address: u64,
-    ) -> Result<(), io::Error> {
+    ) -> EkErr<()> {
         let index: usize;
         let index_address;
         let buffer;
@@ -57,49 +63,55 @@ impl Metadata {
         index_address = (index as u64) * 8;
         buffer = address.to_be_bytes();
 
-        file.seek(SeekFrom::Start(index_address))?;
-        file.write_all(&buffer)?;
+        file.seek(SeekFrom::Start(index_address)).map_err(EK::IO)?;
+        file.write_all(&buffer).map_err(EK::IO)?;
 
         // successfully updated address
         self.addresses[index] = address;
 
         Ok(())
     }
+
 }
 
-pub fn read_metadata(path: impl AsRef<Path>) -> Result<Metadata, io::Error> {
-    let major_ver;
-    let minor_ver;
-    let mut current_pos;
-    let mut file;
-    let mut buffer;
-    let mut pointers;
+impl TryFrom<&Path> for Metadata {
+    type Error = EK;
 
-    file = File::open(&path)?;
-    pointers = vec![];
-    current_pos = 0;
+    fn try_from(path: &Path) -> Result<Self, Self::Error> {
+        let major_ver;
+        let minor_ver;
+        let mut current_pos;
+        let mut file;
+        let mut buffer;
+        let mut addresses;
 
-    buffer = [0_u8; 8];
+        file = File::open(&path).map_err(EK::IO)?;
+        addresses = vec![];
+        current_pos = 0;
 
-    // pointer section
-    loop {
-        file.read_exact(&mut buffer)?;
-        pointers.push(u64::from_be_bytes(buffer));
-        current_pos += 8; // first pointer to metadata start
+        buffer = [0_u8; 8];
 
-        if current_pos >= pointers[0] {
-            break;
+        // address section
+        loop {
+            file.read_exact(&mut buffer).map_err(EK::IO)?;
+            addresses.push(u64::from_be_bytes(buffer));
+            current_pos += 8; // first address to metadata start
+
+            if current_pos >= addresses[0] {
+                break;
+            }
         }
+
+        // change buffer length to 32 bits for versions
+        let mut buffer = [0_u8; 4];
+
+        // metadata section
+        file.read_exact(&mut buffer).map_err(EK::IO)?;
+        major_ver = u32::from_be_bytes(buffer);
+        file.read_exact(&mut buffer).map_err(EK::IO)?;
+        minor_ver = u32::from_be_bytes(buffer);
+
+        Ok(Metadata::new(addresses, major_ver, minor_ver))
     }
-
-    // change buffer length to 32 bits for versions
-    let mut buffer = [0_u8; 4];
-
-    // metadata section
-    file.read_exact(&mut buffer)?;
-    major_ver = u32::from_be_bytes(buffer);
-    file.read_exact(&mut buffer)?;
-    minor_ver = u32::from_be_bytes(buffer);
-
-    Ok(Metadata::new(pointers, major_ver, minor_ver))
 }
+
