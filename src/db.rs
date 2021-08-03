@@ -10,7 +10,7 @@ type EK = ErrorKind;
 type EkErr<T> = Result<T, EK>;
 
 pub const MJR_VER: u32 = 0;
-pub const MIN_VER: u32 = 0;
+pub const MIN_VER: u32 = 1;
 
 #[derive(Debug)]
 pub enum ErrorKind {
