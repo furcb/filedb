@@ -9,12 +9,11 @@ use crate::metadata::{Metadata, Section};
 type EK = ErrorKind;
 type EkErr<T> = Result<T, EK>;
 
-/// Semantic versioning: the Major version number. Incremented when changes are made to the
-/// specification or implementation that break backwards compatibility. Baked into the metadata of
-/// the file.
+/// Major version: Incremented when changes are made to the specification or implementation that
+/// break backwards compatibility. Baked into the metadata of the file.
 pub const MJR_VER: u32 = 0;
-/// SemVer: Minor version number. Incremented when changes are introduced that do not break
-/// backwards compatibility. Baked into the metadata of the file.
+/// Minor version: Incremented when changes are introduced that do not break backwards
+/// compatibility. Baked into the metadata of the file.
 pub const MIN_VER: u32 = 1;
 
 /// Error that can occur while mutating the database
