@@ -125,8 +125,6 @@ impl IndexBlock {
         index_block = IndexBlock::new(index_address);
         IndexBlock::read_from_file(&mut index_block, file)?;
 
-        eprintln!("{:?}", index_block);
-
         if index_block.address()? == 0 {
             Err(EK::IndexEmpty)
         } else {
@@ -547,7 +545,7 @@ impl FileDB {
         }
 
         file.seek(SeekFrom::Start(index_section_start)).map_err(EK::IO)?;
-        file.write_all(&dbg!(index_buffer)).map_err(EK::IO)?;
+        file.write_all(&index_buffer).map_err(EK::IO)?;
 
         Ok(())
     }
