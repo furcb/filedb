@@ -1,4 +1,5 @@
 use std::convert::{TryFrom, TryInto};
+use std::fmt;
 use std::fs::{File, OpenOptions};
 use std::io::{self, prelude::*, SeekFrom};
 use std::mem;
@@ -87,6 +88,38 @@ pub struct FileDB {
     metadata: Metadata,
 }
 
+impl fmt::Display for ErrorKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            EK::IO(e) => write!(f, "FileDB: Normal IO error: {}", e),
+            EK::AddressOverflow => write!(f, "FileDB: Address overflowed."),
+            EK::AddressConversionFailed => write!(f, "FileDB: Address conversion failed."),
+            EK::BufferMissing => write!(f, "FileDB: Write/Read data buffer is missing."),
+            EK::DBFileMissing => write!(
+                f,
+                "FileDB: Database file was dropped, no longer accessible."
+            ),
+            EK::IndexAlreadyExists => write!(
+                f,
+                "FileDB: Value cannot be inserted, already exists. Use update instead"
+            ),
+            EK::IndexEmpty => write!(
+                f,
+                "FileDB: Value at index is empty, try inserting a value first."
+            ),
+            EK::MetadataMissing => write!(f, "FileDB: Unable to obtain metadata."),
+            EK::BlockDataNotProvided => write!(
+                f,
+                "FileDB: Trying to write block, index or value, without data."
+            ),
+            EK::SectionCorrupted => write!(
+                f,
+                "FileDB: Section corrupted, manual intervention necessary."
+            ),
+        }
+    }
+}
+
 impl IndexBlock {
     /// Create an "un-initialized" `IndexBlock`
     pub fn new(index_address: u64) -> Self {
@@ -118,8 +151,7 @@ impl IndexBlock {
         let mut index_block;
 
         // if index section does not exist return None
-        index_section_address = metadata
-            .section_address(Section::Indexes)?;
+        index_section_address = metadata.section_address(Section::Indexes)?;
         index_address = index_section_address + (16 * index);
 
         index_block = IndexBlock::new(index_address);
@@ -140,10 +172,8 @@ impl IndexBlock {
         let address;
         let length;
 
-        index_address = metadata
-            .section_address(Section::Indexes)?;
-        address = metadata
-            .section_address(Section::DataEnd)?;
+        index_address = metadata.section_address(Section::Indexes)?;
+        address = metadata.section_address(Section::DataEnd)?;
         length = data
             .len()
             .try_into()
@@ -371,9 +401,7 @@ impl FileDB {
         let mut file;
 
         // data section end
-        data_section_end_address = self
-            .metadata
-            .section_address(Section::DataEnd)?;
+        data_section_end_address = self.metadata.section_address(Section::DataEnd)?;
 
         // at this point we should have a valid state were we just need to catalog the position of
         // new data and write the new data
@@ -487,8 +515,7 @@ impl FileDB {
         metadata: &Metadata,
         cutoff: u64,
         shift_amount: u64,
-    ) -> EkErr<()>
-    {
+    ) -> EkErr<()> {
         // any index with an address > cutoff
         // needs the data address shifted left by the `shift_amount`
 
@@ -504,7 +531,8 @@ impl FileDB {
 
         index_buffer = vec![0_u8; (index_section_end - index_section_start) as usize];
 
-        file.seek(SeekFrom::Start(index_section_start)).map_err(EK::IO)?;
+        file.seek(SeekFrom::Start(index_section_start))
+            .map_err(EK::IO)?;
         file.read_exact(&mut index_buffer).map_err(EK::IO)?;
 
         chunked_buffer = index_buffer.chunks_mut(8).peekable();
@@ -544,7 +572,8 @@ impl FileDB {
             }
         }
 
-        file.seek(SeekFrom::Start(index_section_start)).map_err(EK::IO)?;
+        file.seek(SeekFrom::Start(index_section_start))
+            .map_err(EK::IO)?;
         file.write_all(&index_buffer).map_err(EK::IO)?;
 
         Ok(())
@@ -566,15 +595,18 @@ impl FileDB {
 
         // delete the data block
         FileDB::shift_data(file, index_block.address()?, index_block.length()? as i64)?;
-        
+
         // update index block data
-        index_block = index_block
-            .with_address(0)
-            .with_length(0);
+        index_block = index_block.with_address(0).with_length(0);
         index_block.write_to_file(file)?;
 
         // update indexes
-        FileDB::update_indexes(file, metadata, index_block.address()?, index_block.length()?)?;
+        FileDB::update_indexes(
+            file,
+            metadata,
+            index_block.address()?,
+            index_block.length()?,
+        )?;
 
         Ok(data)
     }
