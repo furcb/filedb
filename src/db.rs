@@ -1,14 +1,14 @@
 use std::convert::{TryFrom, TryInto};
-use std::fmt;
 use std::fs::{File, OpenOptions};
-use std::io::{self, prelude::*, SeekFrom};
+use std::io::{prelude::*, SeekFrom};
 use std::mem;
 use std::path::Path;
 
 use crate::metadata::{Metadata, Section};
+use crate::error::{Error, ErrorKind};
 
 type EK = ErrorKind;
-type EkErr<T> = Result<T, EK>;
+type EkErr<T> = Result<T, Error>;
 
 /// Major version: Incremented when changes are made to the specification or implementation that
 /// break backwards compatibility. Baked into the metadata of the file.
@@ -16,34 +16,6 @@ pub const MJR_VER: u32 = 0;
 /// Minor version: Incremented when changes are introduced that do not break backwards
 /// compatibility. Baked into the metadata of the file.
 pub const MIN_VER: u32 = 1;
-
-/// Error that can occur while mutating the database
-#[derive(Debug)]
-pub enum ErrorKind {
-    /// Simple wrapper for `std::io::Error`s.
-    IO(io::Error),
-    /// Address arithmetic overflowed, addresses are u64 so it just means 12TB's has been reached.
-    AddressOverflow,
-    /// This can occur in instances where usize is not 64 bits.
-    AddressConversionFailed,
-    /// A buffer necessary to write to the data base was empty or not provided.
-    BufferMissing,
-    /// `FileDB` had a previous `std::io::Error` and file was dropped due to that error. Attempt to
-    /// reload the database.
-    DBFileMissing,
-    /// Attempting to insert into an already written to index is not possible, to do this `update`
-    /// _must_ be used.
-    IndexAlreadyExists,
-    /// Index is empty, generally useful for deciding whether to insert or update.
-    IndexEmpty,
-    /// Metadata is missing
-    MetadataMissing,
-    /// Block buffer not given, should only occur when attempting to write block to database.
-    BlockDataNotProvided,
-    /// Fatal error, leaves the database in an unrecoverable state. Manual intervention is
-    /// necessary.
-    SectionCorrupted,
-}
 
 /// `IndexBlock` container for the tuple in an index block, both values are u64.
 ///
@@ -88,38 +60,6 @@ pub struct FileDB {
     metadata: Metadata,
 }
 
-impl fmt::Display for ErrorKind {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            EK::IO(e) => write!(f, "FileDB: Normal IO error: {}", e),
-            EK::AddressOverflow => write!(f, "FileDB: Address overflowed."),
-            EK::AddressConversionFailed => write!(f, "FileDB: Address conversion failed."),
-            EK::BufferMissing => write!(f, "FileDB: Write/Read data buffer is missing."),
-            EK::DBFileMissing => write!(
-                f,
-                "FileDB: Database file was dropped, no longer accessible."
-            ),
-            EK::IndexAlreadyExists => write!(
-                f,
-                "FileDB: Value cannot be inserted, already exists. Use update instead"
-            ),
-            EK::IndexEmpty => write!(
-                f,
-                "FileDB: Value at index is empty, try inserting a value first."
-            ),
-            EK::MetadataMissing => write!(f, "FileDB: Unable to obtain metadata."),
-            EK::BlockDataNotProvided => write!(
-                f,
-                "FileDB: Trying to write block, index or value, without data."
-            ),
-            EK::SectionCorrupted => write!(
-                f,
-                "FileDB: Section corrupted, manual intervention necessary."
-            ),
-        }
-    }
-}
-
 impl IndexBlock {
     /// Create an "un-initialized" `IndexBlock`
     pub fn new(index_address: u64) -> Self {
@@ -158,7 +98,7 @@ impl IndexBlock {
         IndexBlock::read_from_file(&mut index_block, file)?;
 
         if index_block.address()? == 0 {
-            Err(EK::IndexEmpty)
+            Err(EK::IndexEmpty.into())
         } else {
             Ok(index_block)
         }
@@ -188,12 +128,21 @@ impl IndexBlock {
 
     /// Get the data block address, may be un-initialized or an error could occur on retrieval
     pub fn address(&self) -> EkErr<u64> {
-        self.address.ok_or(EK::BlockDataNotProvided)
+        // NOTE: since an address can only be zero or section_data + offset, we don't need to
+        // consider the case where 0 < address < section_address. At that point FileDB is probably
+        // in an unrecoverable state.
+        if self.address.is_none() {
+            Err(EK::BlockDataNotProvided.into())
+        } else if self.address.unwrap() == 0 {
+            Err(EK::IndexEmpty.into())
+        } else {
+            Ok(self.address.unwrap())
+        }
     }
 
     /// Get the data block length, may be un-initialized or an error could occur on retrieval
     pub fn length(&self) -> EkErr<u64> {
-        self.length.ok_or(EK::BlockDataNotProvided)
+        self.length.ok_or(EK::BlockDataNotProvided.into())
     }
 
     /// Get the data block address or return a zero
@@ -216,13 +165,12 @@ impl IndexBlock {
         length = self.length()?;
 
         // write new block information
-        file.seek(SeekFrom::Start(self.index_address))
-            .map_err(EK::IO)?;
+        file.seek(SeekFrom::Start(self.index_address))?;
         buffer = address.to_be_bytes();
-        file.write_all(&buffer).map_err(EK::IO)?;
+        file.write_all(&buffer)?;
 
         buffer = length.to_be_bytes();
-        file.write_all(&buffer).map_err(EK::IO)?;
+        file.write_all(&buffer)?;
 
         Ok(())
     }
@@ -236,12 +184,11 @@ impl IndexBlock {
         buffer = [0_u8; 8];
 
         // get index position
-        file.seek(SeekFrom::Start(self.index_address))
-            .map_err(EK::IO)?;
-        file.read_exact(&mut buffer).map_err(EK::IO)?;
+        file.seek(SeekFrom::Start(self.index_address))?;
+        file.read_exact(&mut buffer)?;
         address = u64::from_be_bytes(buffer);
 
-        file.read_exact(&mut buffer).map_err(EK::IO)?;
+        file.read_exact(&mut buffer)?;
         length = u64::from_be_bytes(buffer);
 
         self.address = Some(address);
@@ -292,8 +239,8 @@ impl<'a> DataBlock<'a> {
         buffer = self.data.take().ok_or(EK::BufferMissing)?;
 
         // write data
-        file.seek(SeekFrom::Start(self.address)).map_err(EK::IO)?;
-        file.write_all(buffer).map_err(EK::IO)?;
+        file.seek(SeekFrom::Start(self.address))?;
+        file.write_all(buffer)?;
 
         // replace buffer
         self.data = Some(buffer);
@@ -312,15 +259,15 @@ impl<'a> DataBlock<'a> {
 
         buffer = vec![0_u8; self.length as usize];
 
-        file.seek(SeekFrom::Start(self.address)).map_err(EK::IO)?;
-        file.read_exact(&mut buffer).map_err(EK::IO)?;
+        file.seek(SeekFrom::Start(self.address))?;
+        file.read_exact(&mut buffer)?;
 
         Ok(buffer)
     }
 }
 
 impl<'a> TryFrom<&IndexBlock> for DataBlock<'a> {
-    type Error = EK;
+    type Error = Error;
 
     fn try_from(value: &IndexBlock) -> Result<Self, Self::Error> {
         Ok(Self {
@@ -359,8 +306,7 @@ impl FileDB {
             .read(true)
             .write(true)
             //.append(true) // WARN: caused seek to fail for some reason, don't use
-            .open(&path)
-            .map_err(EK::IO)?;
+            .open(&path)?;
 
         metadata = Metadata::try_from(path.as_ref())?;
 
@@ -411,9 +357,10 @@ impl FileDB {
         // if index is empty we can insert otherwise propagate the error or say index already
         // exists
         match IndexBlock::from_filedb(&mut file, &self.metadata, index) {
-            Err(EK::IndexEmpty) => (),
-            Err(e) => return Err(e),
-            Ok(_) => return Err(EK::IndexAlreadyExists),
+            //Err(EK::IndexEmpty) => (),
+            //Err(e) => return Err(e),
+            Err(_) => (),
+            Ok(_) => return Err(EK::IndexAlreadyExists.into()),
         }
 
         // index does not exist so create a new one
@@ -531,9 +478,8 @@ impl FileDB {
 
         index_buffer = vec![0_u8; (index_section_end - index_section_start) as usize];
 
-        file.seek(SeekFrom::Start(index_section_start))
-            .map_err(EK::IO)?;
-        file.read_exact(&mut index_buffer).map_err(EK::IO)?;
+        file.seek(SeekFrom::Start(index_section_start))?;
+        file.read_exact(&mut index_buffer)?;
 
         chunked_buffer = index_buffer.chunks_mut(8).peekable();
 
@@ -551,7 +497,7 @@ impl FileDB {
             // if chunk is not 16, then something went wrong and addresses are of which means the
             // data is not accessible
             if address_chunk.len() < 8 || length_chunk.len() < 8 {
-                return Err(EK::SectionCorrupted);
+                return Err(EK::SectionCorrupted.into());
             }
 
             // parse chunks
@@ -572,9 +518,8 @@ impl FileDB {
             }
         }
 
-        file.seek(SeekFrom::Start(index_section_start))
-            .map_err(EK::IO)?;
-        file.write_all(&index_buffer).map_err(EK::IO)?;
+        file.seek(SeekFrom::Start(index_section_start))?;
+        file.write_all(&index_buffer)?;
 
         Ok(())
     }
@@ -627,7 +572,7 @@ impl FileDB {
         shift_amount = shift_amount.abs();
 
         // set stage for shift
-        file.seek(SeekFrom::Start(address)).map_err(EK::IO)?;
+        file.seek(SeekFrom::Start(address))?;
 
         loop {
             file.seek(SeekFrom::Current(shift_amount)).unwrap();
@@ -652,12 +597,7 @@ impl FileDB {
         let eof_position;
 
         file = self.file_db.take().ok_or(EK::DBFileMissing)?;
-
-        match file.metadata() {
-            Ok(m) => eof_position = m.len(),
-            Err(e) => return Err(EK::IO(e)),
-        }
-
+        eof_position = file.metadata()?.len();
         self.file_db = Some(file);
 
         Ok(eof_position)
@@ -696,16 +636,16 @@ fn create_db(path: impl AsRef<Path>, expected_capacity: u64) -> EkErr<()> {
 
     section_addresses = vec![start_section, index_section, data_section, data_section_end];
 
-    file = File::create(&path).map_err(EK::IO)?;
+    file = File::create(&path)?;
 
     // write addresses to file
     for address in section_addresses {
-        file.write_all(&address.to_be_bytes()).map_err(EK::IO)?;
+        file.write_all(&address.to_be_bytes())?;
     }
 
     // write metadata to file
-    file.write_all(&MJR_VER.to_be_bytes()).map_err(EK::IO)?;
-    file.write_all(&MIN_VER.to_be_bytes()).map_err(EK::IO)?;
+    file.write_all(&MJR_VER.to_be_bytes())?;
+    file.write_all(&MIN_VER.to_be_bytes())?;
 
     // write indexes to file
     count = 0;
@@ -721,7 +661,7 @@ fn create_db(path: impl AsRef<Path>, expected_capacity: u64) -> EkErr<()> {
         count += 1;
     }
 
-    file.write_all(&indexes).map_err(EK::IO)?;
+    file.write_all(&indexes)?;
 
     Ok(())
 }

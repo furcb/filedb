@@ -3,9 +3,9 @@ use std::io::{prelude::*, SeekFrom};
 use std::path::Path;
 use std::convert::TryFrom;
 
-use crate::db::ErrorKind;
+use crate::error::{Error, ErrorKind};
 
-type EkErr<T> = Result<T, ErrorKind>;
+type EkErr<T> = Result<T, Error>;
 type EK = ErrorKind;
 
 #[derive(Debug)]
@@ -44,7 +44,7 @@ impl Metadata {
         // u64 so clone is just a copy
         .copied();
 
-        address.ok_or(EK::MetadataMissing)
+        address.ok_or(EK::MetadataMissing.into())
     }
 
     pub fn update_section_address(
@@ -67,8 +67,8 @@ impl Metadata {
         index_address = (index as u64) * 8;
         buffer = address.to_be_bytes();
 
-        file.seek(SeekFrom::Start(index_address)).map_err(EK::IO)?;
-        file.write_all(&buffer).map_err(EK::IO)?;
+        file.seek(SeekFrom::Start(index_address))?;
+        file.write_all(&buffer)?;
 
         // successfully updated address
         self.addresses[index] = address;
@@ -79,7 +79,7 @@ impl Metadata {
 }
 
 impl TryFrom<&Path> for Metadata {
-    type Error = EK;
+    type Error = Error;
 
     fn try_from(path: &Path) -> Result<Self, Self::Error> {
         let major_ver;
@@ -89,7 +89,7 @@ impl TryFrom<&Path> for Metadata {
         let mut buffer;
         let mut addresses;
 
-        file = File::open(&path).map_err(EK::IO)?;
+        file = File::open(&path)?;
         addresses = vec![];
         current_pos = 0;
 
@@ -97,7 +97,7 @@ impl TryFrom<&Path> for Metadata {
 
         // address section
         loop {
-            file.read_exact(&mut buffer).map_err(EK::IO)?;
+            file.read_exact(&mut buffer)?;
             addresses.push(u64::from_be_bytes(buffer));
             current_pos += 8; // first address to metadata start
 
@@ -110,9 +110,9 @@ impl TryFrom<&Path> for Metadata {
         let mut buffer = [0_u8; 4];
 
         // metadata section
-        file.read_exact(&mut buffer).map_err(EK::IO)?;
+        file.read_exact(&mut buffer)?;
         major_ver = u32::from_be_bytes(buffer);
-        file.read_exact(&mut buffer).map_err(EK::IO)?;
+        file.read_exact(&mut buffer)?;
         minor_ver = u32::from_be_bytes(buffer);
 
         Ok(Metadata::new(addresses, major_ver, minor_ver))
