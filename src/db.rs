@@ -17,6 +17,9 @@ pub const MJR_VER: u32 = 0;
 /// compatibility. Baked into the metadata of the file.
 pub const MIN_VER: u32 = 1;
 
+/// Block width of an individual `IndexBlock`, 16 bytes or two 64bit numbers.
+pub const INDEX_BLOCK_SIZE: u64 = 16;
+
 /// `IndexBlock` container for the tuple in an index block, both values are u64.
 ///
 /// Data block values, address and length, are options for instances when values are not known
@@ -34,10 +37,10 @@ pub struct IndexBlock {
 /// `DataBlock` is a container for the metadata of that block as well as the content. Address and
 /// length are u64, and the data is a byte slice.
 #[derive(Debug)]
-pub struct DataBlock<'a> {
+pub struct DataBlock {
     address: u64,
     length: u64,
-    data: Option<&'a [u8]>,
+    data: Option<Vec<u8>>,
 }
 
 /// `FileDB` is the main point of interaction, it contains a mutable pointer to a `File` and an
@@ -82,17 +85,11 @@ impl IndexBlock {
         self
     }
 
-    /// Return `IndexBlock` data based on index in Indexes
-    ///
-    /// If look up fails for any reason assume file had an issue and is no longer accessible
-    fn from_filedb(file: &mut File, metadata: &Metadata, index: u64) -> EkErr<Self> {
-        let index_section_address;
+    pub(crate) fn try_from_address(file: &mut File, section_address: u64, index: u64) -> EkErr<Self> {
         let index_address;
         let mut index_block;
 
-        // if index section does not exist return None
-        index_section_address = metadata.section_address(Section::Indexes)?;
-        index_address = index_section_address + (16 * index);
+        index_address = section_address + (INDEX_BLOCK_SIZE * index);
 
         index_block = IndexBlock::new(index_address);
         IndexBlock::read_from_file(&mut index_block, file)?;
@@ -102,6 +99,17 @@ impl IndexBlock {
         } else {
             Ok(index_block)
         }
+    }
+
+    /// Return `IndexBlock` data based on index in Indexes
+    ///
+    /// If look up fails for any reason assume file had an issue and is no longer accessible
+    fn try_from_filedb(file: &mut File, metadata: &Metadata, index: u64) -> EkErr<Self> {
+        let index_section_address;
+
+        index_section_address = metadata.section_address(Section::Indexes)?;
+
+        IndexBlock::try_from_address(file, index_section_address, index)
     }
 
     /// Create an `IndexBlock` from `Metadata` information, `index` is necessary so the
@@ -120,7 +128,7 @@ impl IndexBlock {
             .map_err(|_| EK::AddressConversionFailed)?;
 
         Ok(Self {
-            index_address: index_address + (index * 16),
+            index_address: index_address + (index * INDEX_BLOCK_SIZE),
             address: Some(address),
             length: Some(length),
         })
@@ -208,13 +216,13 @@ impl Default for IndexBlock {
     }
 }
 
-impl<'a> DataBlock<'a> {
+impl DataBlock {
     /// Creates a new DataBlock that can be used to read to or write from a data section segment of
     /// memory
     ///
     /// Start must be relative to whole file, since the expected workflow is to use the data
     /// section end address
-    pub fn new(address: u64, length: u64, data: Option<&'a [u8]>) -> Self {
+    pub fn new(address: u64, length: u64, data: Option<Vec<u8>>) -> Self {
         Self {
             address,
             length,
@@ -223,7 +231,7 @@ impl<'a> DataBlock<'a> {
     }
 
     /// Assign the data in builder fashion
-    pub fn with_data(mut self, data: &'a [u8]) -> Self {
+    pub fn with_data(mut self, data: Vec<u8>) -> Self {
         self.data = Some(data);
         self
     }
@@ -240,7 +248,7 @@ impl<'a> DataBlock<'a> {
 
         // write data
         file.seek(SeekFrom::Start(self.address))?;
-        file.write_all(buffer)?;
+        file.write_all(buffer.as_slice())?;
 
         // replace buffer
         self.data = Some(buffer);
@@ -266,7 +274,7 @@ impl<'a> DataBlock<'a> {
     }
 }
 
-impl<'a> TryFrom<&IndexBlock> for DataBlock<'a> {
+impl TryFrom<&IndexBlock> for DataBlock {
     type Error = Error;
 
     fn try_from(value: &IndexBlock) -> Result<Self, Self::Error> {
@@ -327,7 +335,7 @@ impl FileDB {
         file = self.file_db.take().ok_or(EK::DBFileMissing)?;
 
         // if any section does not exist return None
-        index_block = IndexBlock::from_filedb(&mut file, &self.metadata, index)?;
+        index_block = IndexBlock::try_from_filedb(&mut file, &self.metadata, index)?;
         data_block = DataBlock::try_from(&index_block)?;
 
         value = data_block.read_block(&mut file)?;
@@ -356,7 +364,7 @@ impl FileDB {
 
         // if index is empty we can insert otherwise propagate the error or say index already
         // exists
-        match IndexBlock::from_filedb(&mut file, &self.metadata, index) {
+        match IndexBlock::try_from_filedb(&mut file, &self.metadata, index) {
             //Err(EK::IndexEmpty) => (),
             //Err(e) => return Err(e),
             Err(_) => (),
@@ -367,7 +375,7 @@ impl FileDB {
         index_block = IndexBlock::try_from_metadata(&self.metadata, index, &data)?;
 
         // setup data block metadata
-        data_block = DataBlock::try_from(&index_block)?.with_data(data);
+        data_block = DataBlock::try_from(&index_block)?.with_data(Vec::from(data));
 
         // update end of data address
         data_section_end_address = data_section_end_address
@@ -444,6 +452,14 @@ impl FileDB {
         self.file_db = Some(file);
 
         Ok(data)
+    }
+
+    pub fn take_file(&mut self) -> EkErr<File> {
+        self.file_db.take().ok_or(EK::DBFileMissing.into())
+    }
+
+    pub fn metadata(&self) -> &Metadata {
+        &self.metadata
     }
 
     /// Update all index values within the index section
@@ -534,7 +550,7 @@ impl FileDB {
         let mut data_block;
 
         // take snapshot of the block to return it
-        index_block = IndexBlock::from_filedb(file, metadata, index)?;
+        index_block = IndexBlock::try_from_filedb(file, metadata, index)?;
         data_block = DataBlock::try_from(&index_block)?;
         data = data_block.read_block(file)?;
 
@@ -625,7 +641,7 @@ fn create_db(path: impl AsRef<Path>, expected_capacity: u64) -> EkErr<()> {
     debug_assert!(mem::size_of::<u64>() <= mem::size_of::<usize>());
     // shadow capacity with section length in bytes
     adjusted_capacity = expected_capacity
-        .checked_mul(16)
+        .checked_mul(INDEX_BLOCK_SIZE)
         .ok_or(EK::AddressOverflow)?;
 
     // [ metadata start, index start, data start ]

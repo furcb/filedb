@@ -4,6 +4,7 @@ use std::path::Path;
 use std::convert::TryFrom;
 
 use crate::error::{Error, ErrorKind};
+use crate::db;
 
 type EkErr<T> = Result<T, Error>;
 type EK = ErrorKind;
@@ -30,6 +31,18 @@ impl Metadata {
             major_version,
             minor_version,
         }
+    }
+
+    pub fn capacity(&self) -> EkErr<u64> {
+        let index_section_address;
+        let data_section_address;
+
+        index_section_address = self.section_address(Section::Indexes)?;
+        data_section_address = self.section_address(Section::Data)?;
+
+        Ok(
+            (data_section_address - index_section_address) / db::INDEX_BLOCK_SIZE
+        )
     }
 
     pub fn section_address(&self, section: Section) -> EkErr<u64> {
