@@ -453,13 +453,13 @@ impl FileDB {
         let new_section_end_address;
         let mut file;
 
-        data_section_end_address = dbg!(self.metadata.section_address(Section::DataEnd))?;
+        data_section_end_address = self.metadata.section_address(Section::DataEnd)?;
 
         file = self.take_file()?;
 
         // delete block
         data = FileDB::delete_block(&mut file, &self.metadata, index)?;
-        new_section_end_address = dbg!(data_section_end_address - data.len() as u64);
+        new_section_end_address = data_section_end_address - data.len() as u64;
 
         // update section address by deleted data length
         self.metadata.update_section_address(
