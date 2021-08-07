@@ -163,24 +163,28 @@ impl IndexBlock {
         self.length.unwrap_or(0)
     }
 
+    pub fn reset_index(&mut self, file: &mut File) -> EkErr<()> {
+        let address;
+        let length;
+
+        address = 0_u64;
+        length = 0_u64;
+
+        self.address = Some(address);
+        self.length = Some(length);
+
+        self.write_block_data(file, address, length)
+    }
+
     /// Write the `IndexBlock` information to the file
     pub fn write_to_file(&self, file: &mut File) -> EkErr<()> {
         let address;
         let length;
-        let mut buffer;
 
         address = self.address()?;
         length = self.length()?;
 
-        // write new block information
-        file.seek(SeekFrom::Start(self.index_address))?;
-        buffer = address.to_be_bytes();
-        file.write_all(&buffer)?;
-
-        buffer = length.to_be_bytes();
-        file.write_all(&buffer)?;
-
-        Ok(())
+        self.write_block_data(file, address, length)
     }
 
     /// Read and parse the `IndexBlock` in the file
@@ -201,6 +205,20 @@ impl IndexBlock {
 
         self.address = Some(address);
         self.length = Some(length);
+
+        Ok(())
+    }
+
+    fn write_block_data(&self, file: &mut File, address: u64, length: u64) -> EkErr<()> {
+        let mut buffer;
+
+        // write new block information
+        file.seek(SeekFrom::Start(self.index_address))?;
+        buffer = address.to_be_bytes();
+        file.write_all(&buffer)?;
+
+        buffer = length.to_be_bytes();
+        file.write_all(&buffer)?;
 
         Ok(())
     }
@@ -410,7 +428,7 @@ impl FileDB {
     /// Alias for a delete and insert
     ///
     /// `resize` currently does not due anything, reserved parameter
-    pub fn update(&mut self, index: u64, data: &[u8], _resize: bool) -> EkErr<()> {
+    pub fn update(&mut self, index: u64, data: &[u8]) -> EkErr<()> {
         // TODO: if resize is false and data is not exactly the same size as old data return an
         // error, otherwise replace old data. If resize is true and data is the exact same size
         // don't resize.
@@ -432,21 +450,25 @@ impl FileDB {
     pub fn delete(&mut self, index: u64) -> EkErr<Vec<u8>> {
         let data;
         let data_section_end_address;
+        let new_section_end_address;
         let mut file;
 
-        data_section_end_address = self.metadata.section_address(Section::DataEnd)?;
+        data_section_end_address = dbg!(self.metadata.section_address(Section::DataEnd))?;
 
-        file = self.file_db.take().ok_or(EK::DBFileMissing)?;
+        file = self.take_file()?;
 
         // delete block
         data = FileDB::delete_block(&mut file, &self.metadata, index)?;
+        new_section_end_address = dbg!(data_section_end_address - data.len() as u64);
 
         // update section address by deleted data length
         self.metadata.update_section_address(
             &mut file,
             Section::DataEnd,
-            data_section_end_address - data.len() as u64,
+            new_section_end_address,
         )?;
+
+        file.set_len(new_section_end_address)?;
 
         // give back file
         self.file_db = Some(file);
@@ -510,7 +532,7 @@ impl FileDB {
 
             tmp_slice = [0_u8; 8];
 
-            // if chunk is not 16, then something went wrong and addresses are of which means the
+            // if chunk is not 16, then something went wrong and addresses are of, which means the
             // data is not accessible
             if address_chunk.len() < 8 || length_chunk.len() < 8 {
                 return Err(EK::SectionCorrupted.into());
@@ -523,7 +545,7 @@ impl FileDB {
             // check values and adjust values
             if address > cutoff {
                 // adjust value
-                address += shift_amount;
+                address -= shift_amount;
 
                 // update value
                 address_chunk.copy_from_slice(&address.to_be_bytes());
@@ -540,7 +562,7 @@ impl FileDB {
         Ok(())
     }
 
-    /// Will attempt to delete a data block for a specific index
+    /// Will attempt to delete the index block and accompanying data block for a specific index
     ///
     /// Carries the same warning as `updating_indexes` because when a delete occurs indexes must be
     /// updated
@@ -553,13 +575,9 @@ impl FileDB {
         index_block = IndexBlock::try_from_filedb(file, metadata, index)?;
         data_block = DataBlock::try_from(&index_block)?;
         data = data_block.read_block(file)?;
-
-        // delete the data block
+        
+        // shift data to the left
         FileDB::shift_data(file, index_block.address()?, index_block.length()? as i64)?;
-
-        // update index block data
-        index_block = index_block.with_address(0).with_length(0);
-        index_block.write_to_file(file)?;
 
         // update indexes
         FileDB::update_indexes(
@@ -568,6 +586,9 @@ impl FileDB {
             index_block.address()?,
             index_block.length()?,
         )?;
+
+        // update index block data
+        index_block.reset_index(file)?;
 
         Ok(data)
     }
@@ -684,103 +705,120 @@ fn create_db(path: impl AsRef<Path>, expected_capacity: u64) -> EkErr<()> {
 
 #[cfg(test)]
 mod tests {
-    use crate::metadata;
-    use std::path::PathBuf;
-
     use super::*;
 
+    use test_utils::Space;
+
     #[test]
-    #[ignore]
     fn update_basic() {
+        let space;
         let mut fdb;
-        let number;
 
-        fdb = load_db();
+        space = created_space("update_basic");
+        fdb = new_db(&space, 20);
 
-        number = fdb.delete(15).unwrap();
-        fdb.update(16, format!("21").as_bytes(), false).unwrap();
+        for i in 0..20 {
+            fdb.insert(i, format!("{}", i).as_bytes()).unwrap();
+        }
 
-        eprintln!("{}", String::from_utf8_lossy(&number));
+        for i in 0..20 {
+            fdb.update(i, (i*2).to_string().as_bytes()).unwrap();
+        }
+
+        for i in 0..20 {
+            eprintln!("checking {}", i);
+            assert_eq!(String::from_utf8_lossy(&fdb.get(i).unwrap()), (i*2).to_string());
+        }
     }
 
     #[test]
-    #[ignore]
     fn delete_basic() {
+        let space;
         let mut fdb;
-        let number;
 
-        fdb = load_db();
+        space = created_space("delete_basic");
+        fdb = new_db(&space, 20);
 
-        number = fdb.delete(15).unwrap();
+        for i in 0..20 {
+            fdb.insert(i, format!("{}", i).as_bytes()).unwrap();
+        }
 
-        eprintln!("{}", String::from_utf8_lossy(&number));
+        for i in 0..20 {
+            eprintln!("deleting {}", i);
+            assert_eq!(String::from_utf8_lossy(&fdb.delete(i).unwrap()), i.to_string());
+        }
     }
 
     #[test]
     fn get_basic() {
+        let space;
         let mut fdb;
 
-        fdb = load_db();
+        space = created_space("get_basic");
+        fdb = new_db(&space, 20);
 
-        eprintln!("{}", String::from_utf8_lossy(&fdb.get(0).unwrap()));
-        eprintln!("{}", String::from_utf8_lossy(&fdb.get(1).unwrap()));
-        assert!(false)
-    }
-
-    #[test]
-    #[ignore]
-    fn insert_basic() {
-        let mut fdb;
-
-        fdb = load_db();
-
-        //fdb.insert(0, "hello world how are you".as_bytes()).unwrap();
-        //fdb.insert(1, "the sky is blue and the clouds gray".as_bytes())
-        //.unwrap();
-
-        for i in 1..20 {
+        for i in 0..20 {
             fdb.insert(i, format!("{}", i).as_bytes()).unwrap();
         }
-    }
 
-    #[test]
-    #[ignore]
-    fn eof_is_correct() {
-        let path;
-        let mut filedb;
-
-        path = PathBuf::from("./test_space/filedb");
-        filedb = FileDB::load_db(&path).unwrap();
-
-        eprintln!("file length: {}", filedb.eof_position().unwrap());
-        eprintln!(
-            "data section: {}",
-            filedb
-                .metadata
-                .section_address(metadata::Section::Data)
-                .unwrap()
-        );
-    }
-
-    #[test]
-    #[ignore]
-    fn create_basic() {
-        let path;
-
-        path = PathBuf::from("./test_space/filedb");
-
-        if !path.exists() {
-            create_db(&path, 256).unwrap();
+        for i in 0..20 {
+            assert_eq!(String::from_utf8_lossy(&fdb.get(i).unwrap()), i.to_string());
         }
-
-        eprintln!("{:?}", Metadata::try_from(path.as_path()).unwrap());
     }
 
-    fn load_db() -> FileDB {
-        let path;
+    #[test]
+    fn insert_basic() {
+        let space;
+        let mut fdb;
 
-        path = PathBuf::from("./test_space/filedb");
+        space = created_space("insert_basic");
+        fdb = new_db(&space, 20);
 
-        FileDB::load_db(&path).unwrap()
+        for i in 0..20 {
+            fdb.insert(i, i.to_string().as_bytes()).unwrap();
+        }
+    }
+
+    #[test]
+    fn eof_is_correct() {
+        let space;
+        let mut fdb;
+
+        space = created_space("eof_is_correct");
+        fdb = new_db(&space, 20);
+
+        eprintln!("file length: {}", fdb.eof_position().unwrap());
+    }
+
+    #[test]
+    fn create_basic() {
+        let space;
+        let sizes;
+
+        space = created_space("create_basic");
+
+        sizes = vec![256, 1024, 10_240, 500_000];
+        
+        for size in sizes {
+            eprintln!("Creating a filedb with capacity: {}", size);
+            new_db(&space, size);
+        }
+    }
+
+    fn new_db(space: &Space, size: u64) -> FileDB {
+        FileDB::create_db(space.test_path().join("filedb"), size).unwrap()
+    }
+
+    fn created_space(test_name: impl AsRef<str>) -> Space {
+        let space;
+
+        space = new_space(test_name).cleanup_always();
+        space.create_space().unwrap();
+
+        space
+    }
+
+    fn new_space(test_name: impl AsRef<str>) -> Space {
+        Space::new("filedb_db", test_name)
     }
 }

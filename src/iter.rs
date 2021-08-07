@@ -256,7 +256,7 @@ mod tests {
 
         for i in 0..5 {
             if i % 2 == 0 {
-                assert_eq!(iter.next().unwrap().unwrap(), format!("{}", i).as_bytes());
+                assert_eq!(iter.next().unwrap().unwrap(), i.to_string().as_bytes());
             } else {
                 let _ = iter.next();
             }
@@ -281,7 +281,7 @@ mod tests {
             if i % 2 == 0 {
                 assert_eq!(
                     iter.next().unwrap().unwrap(),
-                    (i, Vec::from(format!("{}", i).as_bytes()))
+                    (i, Vec::from(i.to_string().as_bytes()))
                 );
             } else {
                 let _ = iter.next();
@@ -305,7 +305,7 @@ mod tests {
 
         for i in 0..5 {
             if i % 2 == 0 {
-                filedb.insert(i, format!("{}", i).as_bytes())?;
+                filedb.insert(i, i.to_string().as_bytes())?;
             }
         }
 
