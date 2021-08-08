@@ -6,6 +6,7 @@ use std::path::Path;
 
 use crate::metadata::{Metadata, Section};
 use crate::error::{Error, ErrorKind};
+use crate::iter;
 
 type EK = ErrorKind;
 type EkErr<T> = Result<T, Error>;
@@ -482,6 +483,18 @@ impl FileDB {
 
     pub fn metadata(&self) -> &Metadata {
         &self.metadata
+    }
+
+    pub fn into_index_iter(self) -> EkErr<iter::IntoIndexIterator> {
+        iter::IntoIndexIterator::try_from(self)
+    }
+
+    pub fn into_data_iter(self) -> EkErr<iter::IntoDataIterator> {
+        iter::IntoDataIterator::try_from(self)
+    }
+
+    pub fn into_indexed_iter(self) -> EkErr<iter::IntoIndexedIterator> {
+        iter::IntoIndexedIterator::try_from(self)
     }
 
     /// Update all index values within the index section
